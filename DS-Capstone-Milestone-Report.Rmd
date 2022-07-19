@@ -1,0 +1,212 @@
+---
+title: "Data_Science_Capstone_Milestone_report"
+author: "Anna Teplukhina"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Overview
+This milestone report is dedicated to analysis of the English text. Provided text files present a collection of blogs, news and twitter messages. With this exploratory analysis one can find the most common uni- (one word), bi-(two words) and trigrams (three words) presented in the text files. In order to perform this task, the text data are firstly cleaned.
+
+It has been found that the most common unigrams are related to simple words or verbs, bigrams are more related to time events, trigrams are mostly about personal wishes and requests.
+
+## Load libraries
+Firstly, all nessesary libraries are loaded.
+```{r, warning=FALSE, message=FALSE}
+library(ngram)
+library(tm)
+library(ggplot2)
+library(RWeka)
+```
+
+## Load the data
+Provided English text files are loaded from `.txt` files and related to blogs, news and twitter. 
+```{r}
+blogs_path <- "./final/en_US/en_US.blogs.txt"
+blogs_en <- readLines(blogs_path, skipNul = TRUE, warn= FALSE)
+
+news_path <- "./final/en_US/en_US.news.txt"
+news_en <- readLines(news_path, skipNul = TRUE, warn= FALSE)
+
+twitter_path <- "./final/en_US/en_US.twitter.txt"
+twitter_en <- readLines(twitter_path, skipNul = TRUE, warn= FALSE)
+```
+
+As a first look, one can compute size, length and nimber of words in each of the data sets.
+``` {r}
+# Compute file size in Mib
+en_size <- round(file.info(c(blogs_path, news_path, twitter_path))$size/1024^2)
+
+# Compute length/line count
+en_lines <- sapply(list(blogs_en, news_en, twitter_en),length)
+
+# Compute number of words
+en_words <- sapply(list(blogs_en, news_en, twitter_en), wordcount)
+
+# Show summary table
+data.frame(en_lines,en_size,en_words, row.names=c("blogs", "news", "twitter"))
+```
+The blogs contain more information/words than news and twitter. There are a lot of lines/twits in the twitter file. As expected, news are brief compared to blogs and twitter.
+
+## Data cleaning
+Before starting to analyse the text content, the data has to be cleaned from elements that can disturb the analysis, such as numbers or URLs.
+Since the text files are heavy, we will use data sampling (20%) to reduce amount of the text content.
+```{r}
+# Sample size to build the predictive models
+sample_size = 0.02 # 20%
+
+# set seed to ensure reproducibility
+set.seed(142)
+
+# Sample data sets
+blogs_sub <- sample(blogs_en, en_lines[1] * sample_size, replace = FALSE)
+news_sub <- sample(news_en, en_lines[2] * sample_size, replace = FALSE)
+twitter_sub <- sample(twitter_en, en_lines[3] * sample_size, replace = FALSE)
+```
+
+To clean the data, following elements will be removed:
+
+* non-words like ASCII characters;
+* URLs and emails;
+* profanity words using a pre-loaded data file with a list of profanity words;
+* English stop words like "is", "a", "the" and so on;
+* numbers;
+* punctuation marks;
+* white space.
+
+Also, all words will be converted to lowercase and text will be converted to a plain mode.
+
+```{r}
+# Load a .cvs file with profanity words
+profanity <- read.csv("profanity.csv")
+profanity <- profanity[,1]
+# Add space instead of URLs and emails
+add_space <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+
+# Remove ASCII characters
+blogs_clean <- iconv(blogs_sub, "latin1", "ASCII", sub="")
+news_clean <- iconv(news_sub, "latin1", "ASCII", sub="")
+twitter_clean <- iconv(twitter_sub, "latin1", "ASCII", sub="")
+
+# Convert data to a single data set before cleaning
+data_sub <- c(blogs_clean, news_clean, twitter_clean)
+# Convert to use corpus and tm
+data_corpus <- VCorpus(VectorSource(data_sub))
+
+# Remove URLs and emails
+data_clean <- tm_map(data_corpus, add_space, "https\\S*")
+data_clean <- tm_map(data_clean, add_space, "(f|ht)tp(s?)://(.*)[.][a-z]+")
+data_clean <- tm_map(data_clean, add_space, "@[^\\s]+")
+data_clean <- tm_map(data_clean, add_space, "\\b[A-Z a-z 0-9._ - ]*[@](.*?)[.]{1,3} \\b")
+
+# Convert words to lowercase
+data_clean <- tm_map(data_clean, tolower)
+# Remove profanity words
+data_clean <- tm_map(data_clean, removeWords, profanity)
+# Remove English stop words
+data_clean <- tm_map(data_clean, removeWords, stopwords("en"))
+# Remove numbers
+data_clean <- tm_map(data_clean, removeNumbers)
+# Remove punctuation marks
+data_clean <- tm_map(data_clean, removePunctuation)
+# Remove white spaces
+data_clean <- tm_map(data_clean, stripWhitespace)
+# Convert to a plain text
+data_clean <- tm_map(data_clean, PlainTextDocument)
+```
+
+## Exploratory analysis
+With the cleaned data set, one can do some exploratory analysis. Here the text data file is converted to a matrix to the distributions of word frequencies. Then 20 the most frequent words are shown vs their frequency.
+```{r}
+# Convert text to a matrix
+data_mtx <- TermDocumentMatrix(data_clean, control=list(minWordLength=1))
+# Sort the matrix starting from the highest frequency
+all_freq <- sort(rowSums(as.matrix(removeSparseTerms(data_mtx, 0.99))), decreasing = TRUE)
+# Store to a data frame
+words_freq <- data.frame(word = names(all_freq), freq = all_freq, row.names=NULL)
+
+# Plot nn words vs frequencies
+nn = 20
+ggplot(data=words_freq[1:nn,], mapping=aes(x=word, y=freq, fill=freq)) +
+  geom_bar(stat="identity") + 
+  scale_x_discrete(limits = words_freq[1:nn,1]) +
+  theme(axis.text.x = element_text(hjust = 1.0, angle = 45))
+```
+
+One can see that for the selected sample the word `just` has the highest frequency about 5000.
+
+## Tokenization and n-grams
+As the last step of analysis, the frequency of uni-, bi- and trigrams is assessed. It will be done with a help of the `RWeka` library and `NGramTokenizer` function.
+
+### Unigrams
+We start with unigrams, i.e. analyse the presence of one-words. Below, 20 the most frequent unigrams are shown.
+
+```{r}
+# Set a Tokenizer function for unigrams
+unigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+# Create the unigram matrix
+uni_mtx <- TermDocumentMatrix(data_clean, control = list(tokenize = unigramTokenizer))
+# Sort the matrix starting from the highest frequency
+uni_freq <- sort(rowSums(as.matrix(removeSparseTerms(uni_mtx, 0.99))), decreasing = TRUE)
+# Store to a data frame
+uni_freq_df <- data.frame(word = names(uni_freq), freq = uni_freq, row.names=NULL)
+
+# Plot nn words vs frequencies
+nn = 20
+ggplot(data=uni_freq_df[1:nn,], mapping=aes(x=word, y=freq, fill=freq)) +
+  geom_bar(stat="identity") + 
+  scale_x_discrete(limits = uni_freq_df[1:nn,1]) + 
+  theme(axis.text.x = element_text(hjust = 1.0, angle = 45))
+```
+
+As expected, the created unigram matrix and the figure are identical to ones discussed in the exploratory analysis section, during which the single word frequency has been discussed.
+The most frequent unigrams are either simple words like "just" or "one", or verbs "like", "will", "can".
+
+### Bigrams
+Now, a similar approach can be applied to bigrams first and then to trigrams.
+
+```{r}
+# Set a Tokenizer function for bigrams
+bigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+# Create the bigram matrix
+bi_mtx <- TermDocumentMatrix(data_clean, control = list(tokenize = bigramTokenizer))
+# Sort the matrix starting from the highest frequency
+bi_freq <- sort(rowSums(as.matrix(removeSparseTerms(bi_mtx, 0.999))), decreasing = TRUE)
+# Store to a data frame
+bi_freq_df <- data.frame(word = names(bi_freq), freq = bi_freq, row.names=NULL)
+
+# Plot nn words vs frequencies
+nn = 20
+ggplot(data=bi_freq_df[1:nn,], mapping=aes(x=word, y=freq, fill=freq)) +
+  geom_bar(stat="identity") + 
+  scale_x_discrete(limits = bi_freq_df[1:nn,1]) +
+  theme(axis.text.x = element_text(hjust = 1.0, angle = 45))
+```
+
+The most frequent bigrams are related to time: "right now", "last might", "looking forward". Howerver, their frequency is almost 10 times lower than for unigrams.
+
+### Trigrams
+```{r}
+# Set a Tokenizer function for trigrams
+trigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+# Create the trigram matrix
+tri_mtx <- TermDocumentMatrix(data_clean, control = list(tokenize = trigramTokenizer))
+# Sort the matrix starting from the highest frequency
+tri_freq <- sort(rowSums(as.matrix(removeSparseTerms(tri_mtx, 0.9999))), decreasing = TRUE)
+# Store to a data frame
+tri_freq_df <- data.frame(word = names(tri_freq), freq = tri_freq, row.names=NULL)
+
+# Plot nn words vs frequencies
+nn = 20
+ggplot(data=tri_freq_df[1:nn,], mapping=aes(x=word, y=freq, fill=freq)) +
+  geom_bar(stat="identity") + 
+  scale_x_discrete(limits = tri_freq_df[1:nn,1]) +
+  theme(axis.text.x = element_text(hjust = 1.0, angle = 45))
+```
+
+The most frequent trigrams are personal wishes or requests: "happy mothers day", "let us know". Similar to the unigrams-bigrams comparison, the trigrams frequency is about 10 time lower than for bigrams too.
+
+## Next setps
+The next step will be to build and train a numerical model that will be able to predict a next word (or 2-3 words) using a certain text as an input. This will be done for English language based on the discussed data analysis and created uni-, bi- and trigram matrices.
+
+Then a user friendly Shiny app will be build using the developed predictive model. The main goals will be to make it reliable and not heavy or time consuming.
